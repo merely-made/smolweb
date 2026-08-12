@@ -83,3 +83,23 @@ pub(super) fn from_hex_digit(byte: u8) -> Result<u8, String> {
         _ => Err(format!("Invalid hex digit '{}'.", byte as char)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The fingerprint is a wire value: a server returns it as the status-20
+    /// META and every identity record stores it. Pin the NIST vectors so a
+    /// crypto-row bump cannot quietly change the encoding underneath it.
+    #[test]
+    fn the_fingerprint_encoding_is_pinned() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+}
