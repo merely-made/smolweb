@@ -11,49 +11,51 @@ protocol's author.
 | [`spartan-protocol`](crates/spartan-protocol) | Spartan (`spartan://`): plaintext smolweb with uploads via the `=:` prompt. |
 | [`nex-protocol`](crates/nex-protocol) | Nex (`nex://`): the minimal one — plaintext TCP, no TLS, no status codes. |
 | [`guppy-protocol`](crates/guppy-protocol) | Guppy v0.4.4 (`guppy://`): smolweb over UDP, with chunking, acks, and retransmission. |
-| [`gopher-protocol`](crates/gopher-protocol) | Gopher (`gopher://`), Gopher+, and gophers (`gophers://`, TLS): the elder one. RFC 1436 menus, RFC 4266 URLs, Gopher+ attributes, views, and ASK forms. |
-| [`finger-protocol`](crates/finger-protocol) | Finger (`finger://`, RFC 1288) and WebFinger (RFC 7033): the oldest way to ask who someone is, and the one the fediverse uses. |
+| [`gopher-protocol`](crates/gopher-protocol) | Gopher (`gopher://`), Gopher+, and gophers (TLS): RFC 1436 menus, RFC 4266 URLs, Gopher+ attributes, views, and ASK forms. |
+| [`finger-protocol`](crates/finger-protocol) | Finger (RFC 1288) and WebFinger (RFC 7033). |
 | [`gemini-protocol`](crates/gemini-protocol) | Gemini (`gemini://`), the gemtext grammar, TOFU pinning, and titan (`titan://`) upload. |
-| [`kepler-protocol`](crates/kepler-protocol) | Kepler (`kepler://`, `keplers://`): gemini's shape plus the small web's only cache model. |
-| [`dict-protocol`](crates/dict-protocol) | DICT (`dict://`, RFC 2229): networked dictionary lookup. A command loop, not a one-shot fetch. |
-| [`fsp-protocol`](crates/fsp-protocol) | FSP (`fsp://`): anonymous file transfer over UDP, with its own sequencing and checksums. |
-| [`scroll-protocol`](crates/scroll-protocol) | Scroll (`scroll://`) and scrolltext: language negotiation, document metadata, UDC classification, abstracts. |
-| [`text-protocol`](crates/text-protocol) | Text Protocol (`text://`): the deliberately minimal one. Three status codes, everything plain text. |
-| [`scorpion-protocol`](crates/scorpion-protocol) | Scorpion (`scorpion://`, `scorpions://`): the wide one. Four subprotocols, range requests, uploads with conflict detection, and a binary block document format. |
+| [`kepler-protocol`](crates/kepler-protocol) | Kepler (`kepler://`, `keplers://`): gemini's shape plus a cache model. |
+| [`dict-protocol`](crates/dict-protocol) | DICT (RFC 2229): networked dictionary lookup. |
+| [`fsp-protocol`](crates/fsp-protocol) | FSP (`fsp://`): anonymous file transfer over UDP. |
+| [`scroll-protocol`](crates/scroll-protocol) | Scroll (`scroll://`) and scrolltext: language negotiation, metadata, abstracts. |
+| [`text-protocol`](crates/text-protocol) | Text Protocol (`text://`): three status codes, everything plain text. |
+| [`scorpion-protocol`](crates/scorpion-protocol) | Scorpion: four subprotocols, range requests, uploads, a binary block document format. |
 
-All thirteen are MIT licensed, published to crates.io, and usable without
-anything else in this workspace.
+## Status (2026-08-12)
 
-Where a protocol has a successor, it lives in the same crate rather than a new
-one, because the successors are supersets: a plain RFC 1436 menu is simply a
-Gopher+ menu without markers. WebFinger is the exception that proves it, being
-a separate protocol under the same question, so it sits behind its own feature.
+- All thirteen crates are published to crates.io under MIT (the last,
+  `scorpion-protocol`, on 2026-08-08) and usable without anything else in
+  this workspace. MSRV 1.88, held by CI.
+- Servers exist for gopher, finger, and gemini (behind a `server` feature);
+  misfin includes a sending client and receive server. Four crates ship
+  CLIs: misfin, spartan, nex, guppy.
+- Document grammars are dependency-free and separable: take a crate with
+  `default-features = false` to parse without an async runtime.
+- misfin moved to the current crypto row with a pinned fingerprint format
+  on 2026-08-11.
 
-Where a crate carries both a wire protocol and the document grammar that
-protocol defines, both live here, because both are the spec. Grammars are
-dependency-free and separable: a consumer that only parses can take the crate
-with `default-features = false` and pull no async runtime.
+The standing posture, not a roadmap: this workspace stays the wire layer.
+The client integration (`errand`) and the capsule-rendering engine
+(`nematic`) live in [genet](https://github.com/merely-made/genet), which
+consumes these crates from crates.io.
+
+## Use
+
+Add any crate from crates.io as a library dependency. CLI crates run via
+`cargo run -p spartan` (or `nex`, `guppy`, `misfin`). `cargo test`
+exercises the workspace.
 
 ## Stewardship
 
-These crates hold names that belong, morally, to the protocols' communities
-rather than to this workspace. `misfin` in particular is held in stewardship:
-the crate name transfers to the protocol's author on request, no conditions.
-The same offer stands for the others.
+These crate names belong, morally, to the protocols' communities rather
+than to this workspace. `misfin` in particular transfers to the protocol's
+author on request, no conditions. The same offer stands for the others.
 
-## Where the engines live
+## License
 
-This workspace is the wire layer only. The client integration that composes
-these protocols (`errand`) and the engine that renders their capsules as
-documents (`nematic`) are components of
-[genet](https://github.com/merely-made/genet), which consumes these crates from
-crates.io like any other dependency.
+MIT.
 
-## History
+---
 
-`misfin` arrived from its own repository with history intact. The three
-protocol crates were published from standalone repositories in July 2026,
-adopted into genet on 2026-07-10, and moved here on 2026-07-23; their
-commit history for that period lives in
-[genet](https://github.com/merely-made/genet) under
-`components/errand/protocols/`.
+*This README was generated by AI and will be edited by the author upon
+release.*
