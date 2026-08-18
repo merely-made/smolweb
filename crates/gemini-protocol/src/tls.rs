@@ -15,7 +15,7 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use tokio_rustls::TlsConnector;
 
@@ -33,19 +33,32 @@ pub(crate) type SeenCell = Arc<Mutex<Option<[u8; 32]>>>;
 ///
 /// Built per connection because the pin is per host; the verifier stays
 /// `'static` by taking the pin by value rather than borrowing the store.
-pub(crate) fn pinning_connector(pinned: Option<[u8; 32]>) -> (TlsConnector, SeenCell) {
+pub(crate) fn pinning_connector(
+    pinned: Option<[u8; 32]>,
+    identity: Option<crate::client::ClientIdentity<'_>>,
+) -> Result<(TlsConnector, SeenCell), String> {
     let seen: SeenCell = Arc::new(Mutex::new(None));
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = rustls::ClientConfig::builder_with_provider(provider)
+    let builder = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
-        .expect("ring provides the default protocol versions")
+        .map_err(|error| format!("TLS protocol versions: {error}"))?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(PinningVerifier {
             pinned,
             seen: Arc::clone(&seen),
-        }))
-        .with_no_client_auth();
-    (TlsConnector::from(Arc::new(config)), seen)
+        }));
+    let config = match identity {
+        Some(identity) => builder
+            .with_client_auth_cert(
+                vec![CertificateDer::from(identity.certificate_der.to_vec())],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                    identity.private_key_pkcs8_der.to_vec(),
+                )),
+            )
+            .map_err(|error| format!("client certificate: {error}"))?,
+        None => builder.with_no_client_auth(),
+    };
+    Ok((TlsConnector::from(Arc::new(config)), seen))
 }
 
 /// A TLS connector that accepts any server certificate (TOFU-permissive),

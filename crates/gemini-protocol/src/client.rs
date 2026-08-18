@@ -24,6 +24,18 @@ pub const DEFAULT_PORT: u16 = 1965;
 /// 1024; the trailing CRLF rides within that budget here).
 const MAX_REQUEST: usize = 1024;
 
+/// Borrowed client-certificate material for one Gemini TLS connection.
+///
+/// Storage, minting, capsule assignment, and rotation belong to the host's
+/// identity layer. This protocol type only presents the selected self-signed
+/// certificate during the handshake. The private key must be PKCS#8 DER.
+#[cfg(feature = "tls")]
+#[derive(Clone, Copy)]
+pub struct ClientIdentity<'a> {
+    pub certificate_der: &'a [u8],
+    pub private_key_pkcs8_der: &'a [u8],
+}
+
 // ── Vocabulary ─────────────────────────────────────────────────────────────
 
 /// Gemini's status classes, one per leading digit of the two-digit code.
@@ -120,11 +132,7 @@ impl std::fmt::Display for ClientError {
             Self::Connect(m) => write!(f, "connect: {m}"),
             Self::Io(m) => write!(f, "io: {m}"),
             Self::Protocol(m) => write!(f, "protocol: {m}"),
-            Self::CertificateChanged {
-                host,
-                pinned,
-                seen,
-            } => write!(
+            Self::CertificateChanged { host, pinned, seen } => write!(
                 f,
                 "certificate for {host} changed: pinned {pinned}, saw {seen}"
             ),
@@ -187,9 +195,8 @@ pub fn parse_response(raw: &[u8]) -> Result<Response, ClientError> {
     }
     let code = (bytes[0] - b'0') * 10 + (bytes[1] - b'0');
     let meta = header.get(2..).unwrap_or("").trim_start().to_string();
-    let status = Status::from_code(code).ok_or_else(|| {
-        ClientError::Protocol(format!("unknown gemini status class: {code}"))
-    })?;
+    let status = Status::from_code(code)
+        .ok_or_else(|| ClientError::Protocol(format!("unknown gemini status class: {code}")))?;
 
     Ok(Response {
         status,
@@ -218,11 +225,31 @@ pub async fn fetch(url: &str) -> Result<Response, ClientError> {
 /// [`fetch`], for a caller that already has a parsed [`Url`].
 #[cfg(feature = "tls")]
 pub async fn fetch_url(url: &Url) -> Result<Response, ClientError> {
+    fetch_url_inner(url, None).await
+}
+
+/// [`fetch_url`], presenting one caller-selected client certificate.
+///
+/// The caller remains responsible for capsule scoping. This function sends
+/// the supplied identity to exactly the host named by `url`.
+#[cfg(feature = "tls")]
+pub async fn fetch_url_with_identity(
+    url: &Url,
+    identity: ClientIdentity<'_>,
+) -> Result<Response, ClientError> {
+    fetch_url_inner(url, Some(identity)).await
+}
+
+#[cfg(feature = "tls")]
+async fn fetch_url_inner(
+    url: &Url,
+    identity: Option<ClientIdentity<'_>>,
+) -> Result<Response, ClientError> {
     let host = url
         .host_str()
         .ok_or_else(|| ClientError::BadUrl("gemini URL has no host".into()))?;
     let port = url.port().unwrap_or(DEFAULT_PORT);
-    let mut stream = tofu_connect(host, port).await?;
+    let mut stream = tofu_connect_inner(host, port, identity).await?;
     exchange(url, &mut stream).await
 }
 
@@ -242,13 +269,23 @@ pub async fn tofu_connect(
     host: &str,
     port: u16,
 ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, ClientError> {
+    tofu_connect_inner(host, port, None).await
+}
+
+#[cfg(feature = "tls")]
+async fn tofu_connect_inner(
+    host: &str,
+    port: u16,
+    identity: Option<ClientIdentity<'_>>,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>, ClientError> {
     use crate::{tls, tofu};
 
     // Look the host's pin up before connecting (so the verifier stays
     // 'static), then wrap TCP in a pinning TLS handshake.
     let store = tofu::trust_store();
     let pinned = store.fingerprint(host);
-    let (connector, seen) = tls::pinning_connector(pinned);
+    let (connector, seen) =
+        tls::pinning_connector(pinned, identity).map_err(ClientError::Connect)?;
 
     let tcp = TcpStream::connect((host, port))
         .await
@@ -270,7 +307,7 @@ pub async fn tofu_connect(
                 });
             }
             return Err(ClientError::Connect(format!("tls handshake: {e}")));
-        },
+        }
     };
 
     // Clean handshake: pin the fingerprint on first contact.
@@ -286,6 +323,141 @@ pub async fn tofu_connect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "tls")]
+    #[derive(Debug)]
+    struct AcceptAnyClient;
+
+    #[cfg(feature = "tls")]
+    impl rustls::server::danger::ClientCertVerifier for AcceptAnyClient {
+        fn offer_client_auth(&self) -> bool {
+            true
+        }
+
+        fn client_auth_mandatory(&self) -> bool {
+            true
+        }
+
+        fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+            &[]
+        }
+
+        fn verify_client_cert(
+            &self,
+            _end_entity: &rustls::pki_types::CertificateDer<'_>,
+            _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+            _now: rustls::pki_types::UnixTime,
+        ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+            Ok(rustls::server::danger::ClientCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &rustls::pki_types::CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &rustls::pki_types::CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            vec![
+                rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+                rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+                rustls::SignatureScheme::ED25519,
+                rustls::SignatureScheme::RSA_PSS_SHA256,
+                rustls::SignatureScheme::RSA_PSS_SHA384,
+            ]
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[tokio::test]
+    async fn caller_identity_is_presented_in_the_tls_handshake() {
+        use std::sync::Arc;
+
+        use rcgen::{CertificateParams, KeyPair};
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio_rustls::TlsAcceptor;
+
+        let server_key = KeyPair::generate().unwrap();
+        let server_cert = CertificateParams::new(vec!["localhost".into()])
+            .unwrap()
+            .self_signed(&server_key)
+            .unwrap();
+        let client_key = KeyPair::generate().unwrap();
+        let client_cert = CertificateParams::new(Vec::<String>::new())
+            .unwrap()
+            .self_signed(&client_key)
+            .unwrap();
+        let expected_client_cert = client_cert.der().to_vec();
+
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_client_cert_verifier(Arc::new(AcceptAnyClient))
+            .with_single_cert(
+                vec![CertificateDer::from(server_cert.der().to_vec())],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(server_key.serialize_der())),
+            )
+            .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut tls = acceptor.accept(tcp).await.unwrap();
+            let presented = tls
+                .get_ref()
+                .1
+                .peer_certificates()
+                .and_then(|certificates| certificates.first())
+                .expect("the client presented its certificate")
+                .as_ref()
+                .to_vec();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0u8; 256];
+                let read = tls.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "client closed before the Gemini request");
+                request.extend_from_slice(&chunk[..read]);
+                if request.ends_with(b"\r\n") {
+                    break;
+                }
+            }
+            tls.write_all(b"20 text/gemini\r\n# identity received\n")
+                .await
+                .unwrap();
+            tls.shutdown().await.unwrap();
+            presented
+        };
+        let url = Url::parse(&format!("gemini://localhost:{port}/private")).unwrap();
+        let client_key_der = client_key.serialize_der();
+        let client = fetch_url_with_identity(
+            &url,
+            ClientIdentity {
+                certificate_der: client_cert.der().as_ref(),
+                private_key_pkcs8_der: &client_key_der,
+            },
+        );
+        let (presented, response) = tokio::join!(server, client);
+
+        assert_eq!(presented, expected_client_cert);
+        assert_eq!(response.unwrap().body, b"# identity received\n");
+    }
 
     #[test]
     fn parses_success_header_and_body() {
