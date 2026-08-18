@@ -316,7 +316,7 @@ async fn tofu_connect_inner(
         && let Some(fingerprint) = *seen.lock().unwrap()
     {
         store
-            .pin(&target, fingerprint)
+            .try_pin(&target, fingerprint)
             .map_err(|error| ClientError::Io(format!("trust store: {error}")))?;
     }
 

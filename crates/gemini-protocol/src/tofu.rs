@@ -30,9 +30,14 @@ pub trait TofuStore: Send + Sync {
     /// first contact.
     fn fingerprint(&self, target: &str) -> Option<[u8; 32]>;
     /// Record (pin) a fingerprint for `target` after a clean first contact.
-    /// The connection does not proceed to application bytes if persistence
-    /// fails.
-    fn pin(&self, target: &str, fingerprint: [u8; 32]) -> Result<(), String>;
+    fn pin(&self, target: &str, fingerprint: [u8; 32]);
+    /// Fallible pinning hook used before the connection sends application
+    /// bytes. Existing infallible stores inherit the compatible default;
+    /// durable stores override it so a write failure can refuse the request.
+    fn try_pin(&self, target: &str, fingerprint: [u8; 32]) -> Result<(), String> {
+        self.pin(target, fingerprint);
+        Ok(())
+    }
 }
 
 /// A process-lifetime, in-memory [`TofuStore`]. Pins last as long as the
@@ -53,12 +58,11 @@ impl TofuStore for InMemoryTofu {
     fn fingerprint(&self, host: &str) -> Option<[u8; 32]> {
         self.pins.lock().unwrap().get(host).copied()
     }
-    fn pin(&self, host: &str, fingerprint: [u8; 32]) -> Result<(), String> {
+    fn pin(&self, host: &str, fingerprint: [u8; 32]) {
         self.pins
             .lock()
             .unwrap()
             .insert(host.to_string(), fingerprint);
-        Ok(())
     }
 }
 
@@ -73,9 +77,7 @@ impl TofuStore for PermissiveTofu {
     fn fingerprint(&self, _host: &str) -> Option<[u8; 32]> {
         None
     }
-    fn pin(&self, _host: &str, _fingerprint: [u8; 32]) -> Result<(), String> {
-        Ok(())
-    }
+    fn pin(&self, _host: &str, _fingerprint: [u8; 32]) {}
 }
 
 static TRUST_STORE: RwLock<Option<Arc<dyn TofuStore>>> = RwLock::new(None);
@@ -132,11 +134,27 @@ pub(crate) fn target(host: &str, port: u16) -> String {
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct InfallibleHostStore(Mutex<HashMap<String, [u8; 32]>>);
+
+    impl TofuStore for InfallibleHostStore {
+        fn fingerprint(&self, target: &str) -> Option<[u8; 32]> {
+            self.0.lock().unwrap().get(target).copied()
+        }
+
+        fn pin(&self, target: &str, fingerprint: [u8; 32]) {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(target.to_string(), fingerprint);
+        }
+    }
+
     #[test]
     fn in_memory_pins_and_recalls_per_host() {
         let tofu = InMemoryTofu::new();
         assert!(tofu.fingerprint("a.example").is_none());
-        tofu.pin("a.example", [1u8; 32]).unwrap();
+        tofu.pin("a.example", [1u8; 32]);
         assert_eq!(tofu.fingerprint("a.example"), Some([1u8; 32]));
         assert!(tofu.fingerprint("b.example").is_none(), "pins are per host");
     }
@@ -144,7 +162,7 @@ mod tests {
     #[test]
     fn permissive_never_pins() {
         let tofu = PermissiveTofu;
-        tofu.pin("a.example", [1u8; 32]).unwrap();
+        tofu.pin("a.example", [1u8; 32]);
         assert!(
             tofu.fingerprint("a.example").is_none(),
             "permissive store treats every visit as first contact"
@@ -156,6 +174,13 @@ mod tests {
         assert_eq!(fingerprint(b"cert"), fingerprint(b"cert"));
         assert_ne!(fingerprint(b"cert"), fingerprint(b"other"));
         assert_eq!(hex(&[0xde, 0xad, 0x01]), "dead01");
+    }
+
+    #[test]
+    fn existing_infallible_stores_inherit_the_fallible_hook() {
+        let store = InfallibleHostStore::default();
+        store.try_pin("a.example", [1u8; 32]).unwrap();
+        assert_eq!(store.fingerprint("a.example"), Some([1u8; 32]));
     }
 
     #[test]
