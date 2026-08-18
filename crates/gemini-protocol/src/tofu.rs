@@ -6,7 +6,9 @@
 //! the same one — so a *changed* certificate (a man-in-the-middle, a key
 //! rotation, a moved host) is surfaced rather than silently accepted.
 //!
-//! The pin store is a [`TofuStore`] trait so the embedder chooses
+//! Pins are keyed by capsule authority (host plus a non-default port), so two
+//! TLS services on one machine do not silently share trust. The pin store is
+//! a [`TofuStore`] trait so the embedder chooses
 //! durability: [`InMemoryTofu`] holds pins for the process; a host with a
 //! profile supplies its own durable store (a file, a database, an engram).
 //! The store is installed once via [`set_trust_store`]; until then errand
@@ -17,18 +19,20 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
-/// A store of pinned leaf-certificate fingerprints, keyed by host.
+/// A store of pinned leaf-certificate fingerprints, keyed by capsule target.
 ///
 /// `Send + Sync` so one store serves every concurrent fetch. Implementations
 /// decide where pins live; the two `errand` ships are [`InMemoryTofu`] and
-/// [`PermissiveTofu`].
+/// [`PermissiveTofu`]. A target is a lowercase host for the default Gemini
+/// port, or `host:port` for a non-default port; IPv6 hosts retain brackets.
 pub trait TofuStore: Send + Sync {
-    /// The pinned SHA-256 fingerprint for `host`, or `None` if this is a
+    /// The pinned SHA-256 fingerprint for `target`, or `None` if this is a
     /// first contact.
-    fn fingerprint(&self, host: &str) -> Option<[u8; 32]>;
-    /// Record (pin) a fingerprint for `host` — called after a clean first
-    /// contact, or after the embedder accepts a change.
-    fn pin(&self, host: &str, fingerprint: [u8; 32]);
+    fn fingerprint(&self, target: &str) -> Option<[u8; 32]>;
+    /// Record (pin) a fingerprint for `target` after a clean first contact.
+    /// The connection does not proceed to application bytes if persistence
+    /// fails.
+    fn pin(&self, target: &str, fingerprint: [u8; 32]) -> Result<(), String>;
 }
 
 /// A process-lifetime, in-memory [`TofuStore`]. Pins last as long as the
@@ -49,11 +53,12 @@ impl TofuStore for InMemoryTofu {
     fn fingerprint(&self, host: &str) -> Option<[u8; 32]> {
         self.pins.lock().unwrap().get(host).copied()
     }
-    fn pin(&self, host: &str, fingerprint: [u8; 32]) {
+    fn pin(&self, host: &str, fingerprint: [u8; 32]) -> Result<(), String> {
         self.pins
             .lock()
             .unwrap()
             .insert(host.to_string(), fingerprint);
+        Ok(())
     }
 }
 
@@ -68,7 +73,9 @@ impl TofuStore for PermissiveTofu {
     fn fingerprint(&self, _host: &str) -> Option<[u8; 32]> {
         None
     }
-    fn pin(&self, _host: &str, _fingerprint: [u8; 32]) {}
+    fn pin(&self, _host: &str, _fingerprint: [u8; 32]) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 static TRUST_STORE: RwLock<Option<Arc<dyn TofuStore>>> = RwLock::new(None);
@@ -106,6 +113,21 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Stable trust-store key for one TLS service.
+pub(crate) fn target(host: &str, port: u16) -> String {
+    let host = host.to_ascii_lowercase();
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    if port == crate::DEFAULT_PORT {
+        host
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,7 +136,7 @@ mod tests {
     fn in_memory_pins_and_recalls_per_host() {
         let tofu = InMemoryTofu::new();
         assert!(tofu.fingerprint("a.example").is_none());
-        tofu.pin("a.example", [1u8; 32]);
+        tofu.pin("a.example", [1u8; 32]).unwrap();
         assert_eq!(tofu.fingerprint("a.example"), Some([1u8; 32]));
         assert!(tofu.fingerprint("b.example").is_none(), "pins are per host");
     }
@@ -122,7 +144,7 @@ mod tests {
     #[test]
     fn permissive_never_pins() {
         let tofu = PermissiveTofu;
-        tofu.pin("a.example", [1u8; 32]);
+        tofu.pin("a.example", [1u8; 32]).unwrap();
         assert!(
             tofu.fingerprint("a.example").is_none(),
             "permissive store treats every visit as first contact"
@@ -134,5 +156,13 @@ mod tests {
         assert_eq!(fingerprint(b"cert"), fingerprint(b"cert"));
         assert_ne!(fingerprint(b"cert"), fingerprint(b"other"));
         assert_eq!(hex(&[0xde, 0xad, 0x01]), "dead01");
+    }
+
+    #[test]
+    fn trust_targets_distinguish_ports_and_normalize_ipv6() {
+        assert_eq!(target("Capsule.Example", 1965), "capsule.example");
+        assert_eq!(target("Capsule.Example", 1966), "capsule.example:1966");
+        assert_eq!(target("2001:db8::1", 1965), "[2001:db8::1]");
+        assert_eq!(target("2001:db8::1", 1966), "[2001:db8::1]:1966");
     }
 }

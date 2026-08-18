@@ -280,10 +280,11 @@ async fn tofu_connect_inner(
 ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, ClientError> {
     use crate::{tls, tofu};
 
-    // Look the host's pin up before connecting (so the verifier stays
+    // Look the capsule target's pin up before connecting (so the verifier stays
     // 'static), then wrap TCP in a pinning TLS handshake.
     let store = tofu::trust_store();
-    let pinned = store.fingerprint(host);
+    let target = tofu::target(host, port);
+    let pinned = store.fingerprint(&target);
     let (connector, seen) =
         tls::pinning_connector(pinned, identity).map_err(ClientError::Connect)?;
 
@@ -301,7 +302,7 @@ async fn tofu_connect_inner(
                 && pinned != seen
             {
                 return Err(ClientError::CertificateChanged {
-                    host: host.to_string(),
+                    host: target,
                     pinned: tofu::hex(&pinned),
                     seen: tofu::hex(&seen),
                 });
@@ -314,7 +315,9 @@ async fn tofu_connect_inner(
     if pinned.is_none()
         && let Some(fingerprint) = *seen.lock().unwrap()
     {
-        store.pin(host, fingerprint);
+        store
+            .pin(&target, fingerprint)
+            .map_err(|error| ClientError::Io(format!("trust store: {error}")))?;
     }
 
     Ok(stream)
