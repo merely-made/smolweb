@@ -273,7 +273,7 @@ pub async fn tofu_connect(
 }
 
 #[cfg(feature = "tls")]
-async fn tofu_connect_inner(
+pub(crate) async fn tofu_connect_inner(
     host: &str,
     port: u16,
     identity: Option<ClientIdentity<'_>>,

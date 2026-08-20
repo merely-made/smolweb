@@ -20,13 +20,10 @@
 //! For actual writes, call [`upload`] directly with the body bytes, MIME type,
 //! and optional token.
 
-use rustls::pki_types::ServerName;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use url::Url;
 
-use crate::client::{ClientError, Response, parse_response};
-use crate::tls::connector;
+use crate::client::{ClientError, ClientIdentity, Response, parse_response, tofu_connect_inner};
 
 /// Titan shares gemini's port.
 pub const DEFAULT_PORT: u16 = 1965;
@@ -34,7 +31,7 @@ pub const DEFAULT_PORT: u16 = 1965;
 /// Navigate to a `titan://` URL by sending a zero-byte upload and returning the
 /// server's Gemini-format response.
 pub async fn fetch(url: &Url) -> Result<Response, ClientError> {
-    upload_inner(url, &[], "", None).await
+    upload_inner(url, &[], "", None, None).await
 }
 
 /// Upload `body` to `url` with the given `mime` type and optional `token`.
@@ -48,7 +45,22 @@ pub async fn upload(
     mime: &str,
     token: Option<&str>,
 ) -> Result<Response, ClientError> {
-    upload_inner(url, body, mime, token).await
+    upload_inner(url, body, mime, token, None).await
+}
+
+/// Upload while presenting one caller-selected Gemini-family client identity.
+///
+/// The caller remains responsible for capsule scoping. Server trust still
+/// passes through the installed Gemini TOFU store before request bytes leave
+/// the process.
+pub async fn upload_with_identity(
+    url: &Url,
+    body: &[u8],
+    mime: &str,
+    token: Option<&str>,
+    identity: ClientIdentity<'_>,
+) -> Result<Response, ClientError> {
+    upload_inner(url, body, mime, token, Some(identity)).await
 }
 
 async fn upload_inner(
@@ -56,6 +68,7 @@ async fn upload_inner(
     body: &[u8],
     mime: &str,
     token: Option<&str>,
+    identity: Option<ClientIdentity<'_>>,
 ) -> Result<Response, ClientError> {
     let host = url
         .host_str()
@@ -64,16 +77,10 @@ async fn upload_inner(
 
     let request = request_line(url, body.len(), mime, token);
 
-    // Open TLS (same TOFU connector as gemini — they share port 1965).
-    let tcp = TcpStream::connect((host, port))
-        .await
-        .map_err(|e| ClientError::Connect(format!("tcp {host}:{port}: {e}")))?;
-    let server_name = ServerName::try_from(host.to_string())
-        .map_err(|e| ClientError::Connect(format!("server name {host}: {e}")))?;
-    let mut tls = connector()
-        .connect(server_name, tcp)
-        .await
-        .map_err(|e| ClientError::Connect(format!("tls handshake: {e}")))?;
+    // Titan is Gemini's write companion on the same host and port. Reuse the
+    // exact TOFU handshake so a changed certificate is refused before a
+    // mutation request can leave the process.
+    let mut tls = tofu_connect_inner(host, port, identity).await?;
 
     // Send request line + body.
     tls.write_all(request.as_bytes())

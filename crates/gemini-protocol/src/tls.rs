@@ -8,11 +8,11 @@
 //!   the handshake — accepting a first contact or a matching cert, rejecting a
 //!   changed one — so the request is never sent to a host whose certificate no
 //!   longer matches.
-//! - [`connector`] (titan upload): accept
-//!   any server certificate. Pinning these write companions is a follow-up;
-//!   they share hosts with gemini, so they will adopt the same store.
+//! Titan uploads use this same connector through
+//! [`crate::client::tofu_connect_inner`], so reads and writes share one trust
+//! decision.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
@@ -61,23 +61,6 @@ pub(crate) fn pinning_connector(
     Ok((TlsConnector::from(Arc::new(config)), seen))
 }
 
-/// A TLS connector that accepts any server certificate (TOFU-permissive),
-/// for the write companions (titan). Built once and shared.
-pub(crate) fn connector() -> TlsConnector {
-    static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
-    let config = CONFIG.get_or_init(|| {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let config = rustls::ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .expect("ring provides the default protocol versions")
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(AcceptAny))
-            .with_no_client_auth();
-        Arc::new(config)
-    });
-    TlsConnector::from(config.clone())
-}
-
 const ACCEPTED_SCHEMES: [SignatureScheme; 10] = [
     SignatureScheme::RSA_PKCS1_SHA256,
     SignatureScheme::RSA_PKCS1_SHA384,
@@ -118,45 +101,6 @@ impl ServerCertVerifier for PinningVerifier {
                 "gemini TOFU: certificate fingerprint changed".into(),
             )),
         }
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        ACCEPTED_SCHEMES.to_vec()
-    }
-}
-
-/// Accepts any presented certificate and signature (the write companions).
-#[derive(Debug)]
-struct AcceptAny;
-
-impl ServerCertVerifier for AcceptAny {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
