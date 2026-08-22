@@ -24,6 +24,11 @@ pub const DEFAULT_PORT: u16 = 1965;
 /// 1024; the trailing CRLF rides within that budget here).
 const MAX_REQUEST: usize = 1024;
 
+/// Gemini caps the complete response header, including its trailing CRLF, at
+/// 1024 bytes. Enforcing that while reading keeps a peer from turning header
+/// discovery into an unbounded buffer.
+const MAX_RESPONSE_HEADER: usize = 1024;
+
 /// Borrowed client-certificate material for one Gemini TLS connection.
 ///
 /// Storage, minting, capsule assignment, and rotation belong to the host's
@@ -92,6 +97,25 @@ pub struct Response {
     pub body: Vec<u8>,
 }
 
+/// The parsed facts available before a successful response body completes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResponseHead {
+    pub status: Status,
+    pub code: u8,
+    pub meta: String,
+}
+
+impl ResponseHead {
+    /// The MIME type of a successful response, without parameters.
+    pub fn mime(&self) -> Option<&str> {
+        if self.status != Status::Success {
+            return None;
+        }
+        let mime = self.meta.split(';').next().unwrap_or("").trim();
+        (!mime.is_empty()).then_some(mime)
+    }
+}
+
 impl Response {
     /// The MIME type of a successful response: `meta` up to the first `;`
     /// parameter, trimmed. `None` for a non-success or an empty meta.
@@ -155,6 +179,23 @@ pub async fn exchange<S>(url: &Url, stream: &mut S) -> Result<Response, ClientEr
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    exchange_streaming(url, stream, |_, _| {}).await
+}
+
+/// Run a Gemini exchange and report each successful body chunk as it arrives.
+///
+/// The returned [`Response`] still contains the exact complete body. This
+/// keeps custody and compatibility callers on the buffered contract while a
+/// presentation host can act on bytes before connection close.
+pub async fn exchange_streaming<S, F>(
+    url: &Url,
+    stream: &mut S,
+    mut on_chunk: F,
+) -> Result<Response, ClientError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnMut(&ResponseHead, &[u8]),
+{
     let request = format!("{url}\r\n");
     if request.len() > MAX_REQUEST {
         return Err(ClientError::Protocol(format!(
@@ -165,14 +206,52 @@ where
         .write_all(request.as_bytes())
         .await
         .map_err(|e| ClientError::Io(e.to_string()))?;
-    // Gemini servers close the stream when the response ends, so read to EOF.
-    let mut raw = Vec::new();
-    stream
-        .read_to_end(&mut raw)
-        .await
-        .map_err(|e| ClientError::Io(e.to_string()))?;
-
-    parse_response(&raw)
+    let mut header = Vec::new();
+    let mut head = None;
+    let mut body = Vec::new();
+    let mut chunk = [0_u8; 16 * 1024];
+    loop {
+        let read = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|e| ClientError::Io(e.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        let mut incoming = &chunk[..read];
+        if head.is_none() {
+            header.extend_from_slice(incoming);
+            let Some(split) = header.windows(2).position(|window| window == b"\r\n") else {
+                if header.len() >= MAX_RESPONSE_HEADER {
+                    return Err(ClientError::Protocol(format!(
+                        "response header exceeds {MAX_RESPONSE_HEADER} bytes"
+                    )));
+                }
+                continue;
+            };
+            if split + 2 > MAX_RESPONSE_HEADER {
+                return Err(ClientError::Protocol(format!(
+                    "response header exceeds {MAX_RESPONSE_HEADER} bytes"
+                )));
+            }
+            let parsed = parse_response_head(&header[..split])?;
+            let body_start = split + 2;
+            incoming = &header[body_start..];
+            head = Some(parsed);
+        }
+        let parsed = head.as_ref().expect("response head parsed");
+        if parsed.status == Status::Success && !incoming.is_empty() {
+            on_chunk(parsed, incoming);
+            body.extend_from_slice(incoming);
+        }
+    }
+    let head = head.ok_or_else(|| ClientError::Protocol("response header has no CRLF".into()))?;
+    Ok(Response {
+        status: head.status,
+        code: head.code,
+        meta: head.meta,
+        body,
+    })
 }
 
 /// Split a gemini response into its `<status> <meta>\r\n` header and body.
@@ -181,12 +260,23 @@ pub fn parse_response(raw: &[u8]) -> Result<Response, ClientError> {
         .windows(2)
         .position(|w| w == b"\r\n")
         .ok_or_else(|| ClientError::Protocol("response header has no CRLF".into()))?;
-    let header = std::str::from_utf8(&raw[..split])
-        .map_err(|_| ClientError::Protocol("response header is not UTF-8".into()))?;
     let body = raw[split + 2..].to_vec();
+    let head = parse_response_head(&raw[..split])?;
+    Ok(Response {
+        status: head.status,
+        code: head.code,
+        meta: head.meta,
+        body: if head.status == Status::Success {
+            body
+        } else {
+            Vec::new()
+        },
+    })
+}
 
-    // The header is two status digits, a space, then a meta string (which may
-    // be empty). The first digit is the class.
+fn parse_response_head(header: &[u8]) -> Result<ResponseHead, ClientError> {
+    let header = std::str::from_utf8(header)
+        .map_err(|_| ClientError::Protocol("response header is not UTF-8".into()))?;
     let bytes = header.as_bytes();
     if bytes.len() < 2 || !bytes[0].is_ascii_digit() || !bytes[1].is_ascii_digit() {
         return Err(ClientError::Protocol(format!(
@@ -198,17 +288,7 @@ pub fn parse_response(raw: &[u8]) -> Result<Response, ClientError> {
     let status = Status::from_code(code)
         .ok_or_else(|| ClientError::Protocol(format!("unknown gemini status class: {code}")))?;
 
-    Ok(Response {
-        status,
-        code,
-        meta,
-        // Only a success carries a body; otherwise meta is the payload.
-        body: if status == Status::Success {
-            body
-        } else {
-            Vec::new()
-        },
-    })
+    Ok(ResponseHead { status, code, meta })
 }
 
 /// Fetch a `gemini://` URL over TCP and TLS, with trust-on-first-use pinning.
@@ -228,6 +308,15 @@ pub async fn fetch_url(url: &Url) -> Result<Response, ClientError> {
     fetch_url_inner(url, None).await
 }
 
+/// [`fetch_url`], reporting each successful body chunk as it arrives.
+#[cfg(feature = "tls")]
+pub async fn fetch_url_streaming<F>(url: &Url, on_chunk: F) -> Result<Response, ClientError>
+where
+    F: FnMut(&ResponseHead, &[u8]),
+{
+    fetch_url_streaming_inner(url, None, on_chunk).await
+}
+
 /// [`fetch_url`], presenting one caller-selected client certificate.
 ///
 /// The caller remains responsible for capsule scoping. This function sends
@@ -240,17 +329,42 @@ pub async fn fetch_url_with_identity(
     fetch_url_inner(url, Some(identity)).await
 }
 
+/// [`fetch_url_with_identity`], reporting body chunks as they arrive.
+#[cfg(feature = "tls")]
+pub async fn fetch_url_streaming_with_identity<F>(
+    url: &Url,
+    identity: ClientIdentity<'_>,
+    on_chunk: F,
+) -> Result<Response, ClientError>
+where
+    F: FnMut(&ResponseHead, &[u8]),
+{
+    fetch_url_streaming_inner(url, Some(identity), on_chunk).await
+}
+
 #[cfg(feature = "tls")]
 async fn fetch_url_inner(
     url: &Url,
     identity: Option<ClientIdentity<'_>>,
 ) -> Result<Response, ClientError> {
+    fetch_url_streaming_inner(url, identity, |_, _| {}).await
+}
+
+#[cfg(feature = "tls")]
+async fn fetch_url_streaming_inner<F>(
+    url: &Url,
+    identity: Option<ClientIdentity<'_>>,
+    on_chunk: F,
+) -> Result<Response, ClientError>
+where
+    F: FnMut(&ResponseHead, &[u8]),
+{
     let host = url
         .host_str()
         .ok_or_else(|| ClientError::BadUrl("gemini URL has no host".into()))?;
     let port = url.port().unwrap_or(DEFAULT_PORT);
     let mut stream = tofu_connect_inner(host, port, identity).await?;
-    exchange(url, &mut stream).await
+    exchange_streaming(url, &mut stream, on_chunk).await
 }
 
 /// Open a TLS connection with trust-on-first-use pinning, without speaking
@@ -562,6 +676,41 @@ mod tests {
         assert_eq!(response.status, Status::Success);
         assert_eq!(response.mime(), Some("text/gemini"));
         assert_eq!(response.body, b"# Hello over an arbitrary stream\n");
+    }
+
+    #[tokio::test]
+    async fn streaming_exchange_reports_a_prefix_before_the_tail_arrives() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        let url = Url::parse("gemini://capsule.example/live").unwrap();
+        let prefix_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_release = prefix_seen.clone();
+        let server = tokio::spawn(async move {
+            let mut request = [0_u8; 1024];
+            let _ = server.read(&mut request).await.unwrap();
+            server
+                .write_all(b"20 text/gemini\r\n# Prefix\n")
+                .await
+                .unwrap();
+            while !server_release.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+            server.write_all(b"Tail\n").await.unwrap();
+            server.shutdown().await.unwrap();
+        });
+
+        let mut client = client;
+        let mut chunks = Vec::new();
+        let response = exchange_streaming(&url, &mut client, |head, chunk| {
+            assert_eq!(head.mime(), Some("text/gemini"));
+            chunks.push(chunk.to_vec());
+            prefix_seen.store(true, std::sync::atomic::Ordering::Release);
+        })
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(chunks, [b"# Prefix\n".to_vec(), b"Tail\n".to_vec()]);
+        assert_eq!(response.body, b"# Prefix\nTail\n");
     }
 
     #[tokio::test]

@@ -60,10 +60,16 @@ pub mod tofu;
 pub use gemtext::{GemLine, parse as parse_gemtext};
 
 #[cfg(feature = "client")]
-pub use client::{ClientError, DEFAULT_PORT, Response, Status, exchange, parse_response};
+pub use client::{
+    ClientError, DEFAULT_PORT, Response, ResponseHead, Status, exchange, exchange_streaming,
+    parse_response,
+};
 
 #[cfg(feature = "tls")]
-pub use client::{ClientIdentity, fetch, fetch_url_with_identity, tofu_connect};
+pub use client::{
+    ClientIdentity, fetch, fetch_url_streaming, fetch_url_streaming_with_identity,
+    fetch_url_with_identity, tofu_connect,
+};
 #[cfg(feature = "tls")]
 pub use tofu::{InMemoryTofu, PermissiveTofu, TofuStore, set_trust_store};
 
