@@ -106,7 +106,7 @@ So the rule, stated once:
 
 ### The defect this exposes, and it is ours
 
-The fidelity plan (`mere/design_docs/nematic_docs/implementation_strategy/2026-07-01_smolweb_fidelity_plan.md`)'s
+The fidelity plan (`genet/design_docs/nematic_docs/implementation_strategy/2026-07-01_smolweb_fidelity_plan.md`)'s
 WS2 maps **protocol to posture**: gemini to TOFU, gopher and finger and nex and
 spartan to Insecure, misfin to Trusted-with-signer. Under carrier independence
 that table is simply **wrong**, and it would ship a lie:

@@ -64,12 +64,12 @@ crate.
 
 ## Effect on the existing plans
 
-- Native smolweb rendering plan (`mere/design_docs/nematic_docs/implementation_strategy/2026-06-27_native_smolweb_rendering_plan.md`):
+- Native smolweb rendering plan (`genet/design_docs/nematic_docs/implementation_strategy/2026-06-27_native_smolweb_rendering_plan.md`):
   its §5 crate-home diagram ("parse folds into errand", errand as a sibling
   repo) predates both the genet adoption and this decision. The two-family
   model and the render architecture stand; the crate homes read through this
   note now.
-- Smolweb fidelity plan (`mere/design_docs/nematic_docs/implementation_strategy/2026-07-01_smolweb_fidelity_plan.md`):
+- Smolweb fidelity plan (`genet/design_docs/nematic_docs/implementation_strategy/2026-07-01_smolweb_fidelity_plan.md`):
   WS1's AST enrichment lands wherever the grammar lives at the time; if a
   grammar has moved to a smolweb crate, the enrichment goes there. WS2 (trust)
   and WS3 (regime B) are implementation-side and unaffected.
@@ -366,7 +366,7 @@ reachable specs; `scroll` is blocked on a dead host and waits.
 document format *richer than gemtext*, and nematic's `scroll` engine currently
 delegates to `GemtextEngine`. So scroll content is being flattened into
 gemtext's line model, which is exactly the collapse the
-fidelity plan (`mere/design_docs/nematic_docs/implementation_strategy/2026-07-01_smolweb_fidelity_plan.md`)
+fidelity plan (`genet/design_docs/nematic_docs/implementation_strategy/2026-07-01_smolweb_fidelity_plan.md`)
 exists to catch, and it is a parse-layer loss of the kind that plan's §1
 identifies. Note also that scroll has a nematic engine but **no errand
 transport**, so it is currently a format we half-read and cannot fetch.

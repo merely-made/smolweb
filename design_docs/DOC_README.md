@@ -46,10 +46,11 @@ workspace and the spec-level documents were repatriated here from mere.
 
 Implementation-side material — the AST lowerings, capture, rendering, theming,
 trust chrome, and the knot composition work — belongs to genet and mere. Per
-core §5 those are cited by path rather than copied. As of 2026-08-24 the
-relevant docs still live at:
+core §5 those are cited by path rather than copied. They were repatriated to
+genet on 2026-08-24, alongside the component areas for inker and verso-tile,
+and now live at:
 
-- `mere/design_docs/nematic_docs/implementation_strategy/` — the polyglot knot
+- `genet/design_docs/nematic_docs/implementation_strategy/` — the polyglot knot
   design, the knot evaluation/export plan, the polyglot block resolver plan,
   the native smolweb rendering plan, and the smolweb fidelity plan. Their
   disposition is tracked in phase C of
