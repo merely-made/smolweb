@@ -20,7 +20,7 @@
 //! For actual writes, call [`upload`] directly with the body bytes, MIME type,
 //! and optional token.
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use url::Url;
 
 use crate::client::{ClientError, ClientIdentity, Response, parse_response, tofu_connect_inner};
@@ -28,10 +28,28 @@ use crate::client::{ClientError, ClientIdentity, Response, parse_response, tofu_
 /// Titan shares gemini's port.
 pub const DEFAULT_PORT: u16 = 1965;
 
+/// Default cap for a Titan server's Gemini response body. Callers that expect
+/// larger receipts can use [`upload_with_options`].
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Bounds applied while reading a Titan response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UploadOptions {
+    pub max_response_bytes: usize,
+}
+
+impl Default for UploadOptions {
+    fn default() -> Self {
+        Self {
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+        }
+    }
+}
+
 /// Navigate to a `titan://` URL by sending a zero-byte upload and returning the
 /// server's Gemini-format response.
 pub async fn fetch(url: &Url) -> Result<Response, ClientError> {
-    upload_inner(url, &[], "", None, None).await
+    upload_inner(url, &[], "", None, None, UploadOptions::default()).await
 }
 
 /// Upload `body` to `url` with the given `mime` type and optional `token`.
@@ -45,7 +63,18 @@ pub async fn upload(
     mime: &str,
     token: Option<&str>,
 ) -> Result<Response, ClientError> {
-    upload_inner(url, body, mime, token, None).await
+    upload_inner(url, body, mime, token, None, UploadOptions::default()).await
+}
+
+/// Upload with an explicit response-body bound.
+pub async fn upload_with_options(
+    url: &Url,
+    body: &[u8],
+    mime: &str,
+    token: Option<&str>,
+    options: UploadOptions,
+) -> Result<Response, ClientError> {
+    upload_inner(url, body, mime, token, None, options).await
 }
 
 /// Upload while presenting one caller-selected Gemini-family client identity.
@@ -60,7 +89,15 @@ pub async fn upload_with_identity(
     token: Option<&str>,
     identity: ClientIdentity<'_>,
 ) -> Result<Response, ClientError> {
-    upload_inner(url, body, mime, token, Some(identity)).await
+    upload_inner(
+        url,
+        body,
+        mime,
+        token,
+        Some(identity),
+        UploadOptions::default(),
+    )
+    .await
 }
 
 async fn upload_inner(
@@ -69,7 +106,9 @@ async fn upload_inner(
     mime: &str,
     token: Option<&str>,
     identity: Option<ClientIdentity<'_>>,
+    options: UploadOptions,
 ) -> Result<Response, ClientError> {
+    validate_request(url, body.len(), mime, token, options)?;
     let host = url
         .host_str()
         .ok_or_else(|| ClientError::BadUrl("titan URL has no host".into()))?;
@@ -93,12 +132,70 @@ async fn upload_inner(
     }
 
     // Read and parse the Gemini-format response.
-    let mut raw = Vec::new();
-    tls.read_to_end(&mut raw)
-        .await
-        .map_err(|e| ClientError::Io(e.to_string()))?;
+    let raw = read_response(&mut tls, options.max_response_bytes).await?;
 
     parse_response(&raw)
+}
+
+fn validate_request(
+    url: &Url,
+    body_len: usize,
+    mime: &str,
+    token: Option<&str>,
+    options: UploadOptions,
+) -> Result<(), ClientError> {
+    if url.scheme() != "titan"
+        || url.host_str().is_none()
+        || url.username() != ""
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url.path().contains(';')
+    {
+        return Err(ClientError::Protocol("invalid titan URL".into()));
+    }
+    if options.max_response_bytes == 0 {
+        return Err(ClientError::Protocol(
+            "Titan response limit must be non-zero".into(),
+        ));
+    }
+    if !field_is_safe(mime) || token.is_some_and(|value| !field_is_safe(value)) {
+        return Err(ClientError::Protocol(
+            "Titan MIME and token fields contain a forbidden delimiter or control byte".into(),
+        ));
+    }
+    if request_line(url, body_len, mime, token).len() > 1024 {
+        return Err(ClientError::Protocol(
+            "Titan request line exceeds 1024 bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn field_is_safe(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| (0x21..=0x7e).contains(&byte) && byte != b';')
+}
+
+async fn read_response<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    max_body_bytes: usize,
+) -> Result<Vec<u8>, ClientError> {
+    let mut raw = Vec::new();
+    let read_limit = max_body_bytes
+        .checked_add(1)
+        .ok_or_else(|| ClientError::Protocol("Titan response limit is too large".into()))?;
+    stream
+        .take(read_limit as u64)
+        .read_to_end(&mut raw)
+        .await
+        .map_err(|e| ClientError::Io(e.to_string()))?;
+    if raw.len() > max_body_bytes {
+        return Err(ClientError::Protocol(
+            "Titan response exceeds configured limit".into(),
+        ));
+    }
+    Ok(raw)
 }
 
 /// Build titan's request line:
@@ -142,5 +239,77 @@ mod tests {
             request_line(&url, 0, "", None),
             "titan://example.org/raw/page;size=0\r\n"
         );
+    }
+
+    #[test]
+    fn request_validation_rejects_injection_and_wrong_urls_before_connect() {
+        let good = Url::parse("titan://example.org/page").unwrap();
+        assert!(
+            validate_request(
+                &good,
+                0,
+                "text/gemini\r\n20",
+                None,
+                UploadOptions::default()
+            )
+            .is_err()
+        );
+        assert!(
+            validate_request(
+                &good,
+                0,
+                "text/gemini",
+                Some("x;y"),
+                UploadOptions::default()
+            )
+            .is_err()
+        );
+        assert!(
+            validate_request(
+                &Url::parse("gemini://example.org/page#frag").unwrap(),
+                0,
+                "",
+                None,
+                UploadOptions::default()
+            )
+            .is_err()
+        );
+        assert!(
+            validate_request(
+                &Url::parse("titan://user:pass@example.org/page").unwrap(),
+                0,
+                "",
+                None,
+                UploadOptions::default()
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn response_reader_refuses_oversize_without_truncating() {
+        let (mut reader, mut writer) = tokio::io::duplex(32);
+        tokio::spawn(async move {
+            writer.write_all(b"12345").await.unwrap();
+            writer.shutdown().await.unwrap();
+        });
+        let error = read_response(&mut reader, 4).await.unwrap_err();
+        assert!(matches!(error, ClientError::Protocol(message) if message.contains("exceeds")));
+    }
+
+    #[tokio::test]
+    async fn public_upload_refuses_before_connect_for_invalid_fields() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = Url::parse(&format!("titan://127.0.0.1:{port}/page")).unwrap();
+        let error = upload(&url, b"body", "text/gemini\r\n20", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ClientError::Protocol(message) if message.contains("delimiter")));
+        assert!(matches!(
+            listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ), "invalid request must not connect");
     }
 }

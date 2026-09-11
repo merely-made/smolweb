@@ -64,6 +64,8 @@ pub use client::{
     ClientError, DEFAULT_PORT, Response, ResponseHead, Status, exchange, exchange_streaming,
     parse_response,
 };
+#[cfg(feature = "tls")]
+pub use titan::{DEFAULT_MAX_RESPONSE_BYTES, UploadOptions, upload_with_options};
 
 #[cfg(feature = "tls")]
 pub use client::{
