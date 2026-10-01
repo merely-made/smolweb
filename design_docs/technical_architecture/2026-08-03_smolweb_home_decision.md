@@ -207,6 +207,18 @@ they resolve differently:
   finger is a line of text over TCP, so it ships beside finger but behind
   `webfinger`, and errand takes the crate without it.
 
+  **Amended 2026-10-01.** The `webfinger` feature gains its first consumer.
+  Mark ruled that mere's gazette port adopts it for the request URL and the
+  JRD in both directions, replacing gazette's own blocking-`reqwest` parser.
+  That parser was older than this crate, kept a link's `rel`, `type` and
+  `href` only, and cannot compile for wasm32, while this feature can. The
+  same ruling moves gazette's resource normalization upstream into this
+  crate: a bare `user@host`, an `acct:` URI, or a URL with its origin and
+  port, resolved to the request URL. That keeps all of the wire in the spec
+  crate and leaves gazette its endpoint classification and contact intake.
+  Unbuilt. The record and the comparison are in mere's
+  `design_docs/dramatis_docs/technical_architecture/2026-09-30_dramatis_tier_architecture.md`.
+
 What makes the grouping safe is that **the cost is feature-gated, not
 crate-gated**. Every grammar is dependency-free and always compiled; every
 transport rides a feature. So `gemini-protocol` with
