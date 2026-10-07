@@ -26,7 +26,7 @@ A consumer that only renders gophermaps takes the crate without the client and
 pulls no async runtime:
 
 ```toml
-gopher-protocol = { version = "0.1", default-features = false }
+gopher-protocol = { version = "0.2", default-features = false }
 ```
 
 The client rides the default `client` feature, and a **server** rides the

@@ -33,8 +33,10 @@ pub enum GopherKind {
     Image,
     /// `s` — sound.
     Sound,
-    /// `T` — telnet session.
+    /// `8` telnet or `T` tn3270 session; [`GopherItem::raw_type`] says which.
     Telnet,
+    /// `2` — CSO phone-book server, an interactive query.
+    Cso,
     /// `h` — URL item (the selector carries an external URL).
     Url,
     /// Any other (still navigable) item type.
@@ -72,6 +74,12 @@ impl GopherPlus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GopherItem {
     pub kind: GopherKind,
+    /// The item-type character exactly as the menu line carried it. [`kind`]
+    /// is the semantic class; this keeps what the class folds together (`g`
+    /// and `I`, `8` and `T`, every type under [`GopherKind::Other`]).
+    ///
+    /// [`kind`]: GopherItem::kind
+    pub raw_type: char,
     pub display: String,
     /// The resource URL: a synthesised `gopher://` URL (RFC 4266) for standard
     /// items, or the extracted target for a `h` URL item. `None` for [`Info`] and
@@ -122,12 +130,14 @@ fn parse_line(line: &str) -> Option<GopherItem> {
     match type_char {
         'i' => Some(GopherItem {
             kind: GopherKind::Info,
+            raw_type: type_char,
             display,
             url: None,
             plus,
         }),
         '3' => Some(GopherItem {
             kind: GopherKind::Error,
+            raw_type: type_char,
             display,
             url: None,
             plus,
@@ -141,6 +151,7 @@ fn parse_line(line: &str) -> Option<GopherItem> {
             }
             Some(GopherItem {
                 kind: GopherKind::Url,
+                raw_type: type_char,
                 display,
                 url: Some(url.to_string()),
                 plus,
@@ -153,6 +164,7 @@ fn parse_line(line: &str) -> Option<GopherItem> {
             let url = synthesise_gopher_url(type_char, host, port, selector);
             Some(GopherItem {
                 kind: kind_of(type_char),
+                raw_type: type_char,
                 display,
                 url: Some(url),
                 plus,
@@ -165,11 +177,12 @@ fn kind_of(type_char: char) -> GopherKind {
     match type_char {
         '0' => GopherKind::Text,
         '1' => GopherKind::Submenu,
+        '2' => GopherKind::Cso,
         '7' => GopherKind::Search,
         '9' => GopherKind::Binary,
         'g' | 'I' => GopherKind::Image,
         's' => GopherKind::Sound,
-        'T' => GopherKind::Telnet,
+        '8' | 'T' => GopherKind::Telnet,
         other => GopherKind::Other(other),
     }
 }
@@ -207,6 +220,7 @@ mod tests {
             items,
             vec![GopherItem {
                 kind: GopherKind::Text,
+                raw_type: '0',
                 display: "Welcome text".into(),
                 url: Some("gopher://example.test/0/welcome.txt".into()),
                 plus: None,
@@ -248,6 +262,7 @@ mod tests {
             items[0],
             GopherItem {
                 kind: GopherKind::Info,
+                raw_type: 'i',
                 display: "hello".into(),
                 url: None,
                 plus: None
@@ -257,11 +272,41 @@ mod tests {
             items[1],
             GopherItem {
                 kind: GopherKind::Error,
+                raw_type: '3',
                 display: "boom".into(),
                 url: None,
                 plus: None
             }
         );
+    }
+
+    #[test]
+    fn telnet_and_tn3270_are_both_telnet_and_keep_their_type() {
+        let items = parse(&format!(
+            "{}{}",
+            line('8', "telnet", "", "example.test", "23"),
+            line('T', "tn3270", "", "example.test", "23"),
+        ));
+        let got: Vec<_> = items.iter().map(|item| (item.kind.clone(), item.raw_type)).collect();
+        assert_eq!(
+            got,
+            [(GopherKind::Telnet, '8'), (GopherKind::Telnet, 'T')],
+            "RFC 1436: 8 is telnet, T is tn3270"
+        );
+    }
+
+    #[test]
+    fn cso_is_named_and_folded_types_keep_their_character() {
+        let items = parse(&format!(
+            "{}{}{}",
+            line('2', "phone book", "", "example.test", "105"),
+            line('g', "a gif", "/a.gif", "example.test", "70"),
+            line('5', "dos binary", "/a.exe", "example.test", "70"),
+        ));
+        assert_eq!(items[0].kind, GopherKind::Cso);
+        assert_eq!(items[0].url.as_deref(), Some("gopher://example.test:105/2"));
+        assert_eq!((items[1].kind.clone(), items[1].raw_type), (GopherKind::Image, 'g'));
+        assert_eq!((items[2].kind.clone(), items[2].raw_type), (GopherKind::Other('5'), '5'));
     }
 
     #[test]
